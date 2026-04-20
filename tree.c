@@ -119,6 +119,69 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 
 // ─── TODO: Implement these ──────────────────────────────────────────────────
 
+typedef struct BuildNode {
+    char name[256];
+    uint32_t mode;
+    ObjectID hash;
+    int is_file;
+    struct BuildNode *child;
+    struct BuildNode *sibling;
+} BuildNode;
+
+static BuildNode *build_node_create(const char *name, uint32_t mode, const ObjectID *hash, int is_file) {
+    BuildNode *node = malloc(sizeof(BuildNode));
+    if (node == NULL) {
+        return NULL;
+    }
+
+    if (strlen(name) >= sizeof(node->name)) {
+        free(node);
+        return NULL;
+    }
+
+    strcpy(node->name, name);
+    node->mode = mode;
+    if (hash != NULL) {
+        node->hash = *hash;
+    } else {
+        memset(&node->hash, 0, sizeof(node->hash));
+    }
+    node->is_file = is_file;
+    node->child = NULL;
+    node->sibling = NULL;
+    return node;
+}
+
+static void build_node_free(BuildNode *node) {
+    if (node == NULL) {
+        return;
+    }
+
+    build_node_free(node->child);
+    build_node_free(node->sibling);
+    free(node);
+}
+
+static BuildNode *build_node_find_child(BuildNode *parent, const char *name) {
+    for (BuildNode *child = parent->child; child != NULL; child = child->sibling) {
+        if (strcmp(child->name, name) == 0) {
+            return child;
+        }
+    }
+    return NULL;
+}
+
+static BuildNode *build_node_add_child(BuildNode *parent, const char *name, uint32_t mode, const ObjectID *hash, int is_file) {
+    BuildNode *node = build_node_create(name, mode, hash, is_file);
+    if (node == NULL) {
+        return NULL;
+    }
+
+    node->sibling = parent->child;
+    parent->child = node;
+    return node;
+}
+
 static int tree_add_entry(Tree *tree, uint32_t mode, const ObjectID *hash, const char *name) {
     TreeEntry *entry;
 
@@ -133,75 +196,70 @@ static int tree_add_entry(Tree *tree, uint32_t mode, const ObjectID *hash, const
     return 0;
 }
 
-static int write_tree_level(const Index *index, const char *prefix, ObjectID *id_out) {
+static int insert_index_path(BuildNode *parent, char *path, const IndexEntry *entry) {
+    char *slash = strchr(path, '/');
+
+    if (*path == '\0') {
+        return -1;
+    }
+
+    if (slash == NULL) {
+        BuildNode *file = build_node_find_child(parent, path);
+
+        if (file == NULL) {
+            file = build_node_add_child(parent, path, entry->mode, &entry->hash, 1);
+            if (file == NULL) {
+                return -1;
+            }
+        } else if (!file->is_file) {
+            return -1;
+        } else {
+            file->mode = entry->mode;
+            file->hash = entry->hash;
+        }
+        return 0;
+    }
+
+    *slash = '\0';
+
+    {
+        BuildNode *dir = build_node_find_child(parent, path);
+        if (dir == NULL) {
+            dir = build_node_add_child(parent, path, MODE_DIR, NULL, 0);
+            if (dir == NULL) {
+                return -1;
+            }
+        } else if (dir->is_file) {
+            return -1;
+        }
+
+        return insert_index_path(dir, slash + 1, entry);
+    }
+}
+
+static int write_tree_from_node(const BuildNode *node, ObjectID *id_out) {
     Tree tree;
-    size_t prefix_len = strlen(prefix);
     void *data = NULL;
     size_t len = 0;
 
     tree.count = 0;
 
-    for (int i = 0; i < index->count; i++) {
-        const IndexEntry *entry = &index->entries[i];
-        const char *relative;
-        const char *slash;
+    for (const BuildNode *child = node->child; child != NULL; child = child->sibling) {
+        ObjectID child_id;
 
-        if (strncmp(entry->path, prefix, prefix_len) != 0) {
-            continue;
-        }
-
-        relative = entry->path + prefix_len;
-        if (*relative == '\0') {
-            continue;
-        }
-
-        slash = strchr(relative, '/');
-        if (slash == NULL) {
-            if (tree_add_entry(&tree, entry->mode, &entry->hash, relative) != 0) {
+        if (child->is_file) {
+            if (tree_add_entry(&tree, child->mode, &child->hash, child->name) != 0) {
                 return -1;
             }
             continue;
         }
 
-        {
-            size_t component_len = (size_t)(slash - relative);
-            int already_added = 0;
+        if (write_tree_from_node(child, &child_id) != 0) {
+            return -1;
+        }
 
-            for (int j = 0; j < tree.count; j++) {
-                if (tree.entries[j].mode == MODE_DIR &&
-                    strncmp(tree.entries[j].name, relative, component_len) == 0 &&
-                    tree.entries[j].name[component_len] == '\0') {
-                    already_added = 1;
-                    break;
-                }
-            }
-            if (already_added) {
-                continue;
-            }
-
-            {
-                char dirname[256];
-                char child_prefix[768];
-                ObjectID child_id;
-
-                if (component_len >= sizeof(dirname)) {
-                    return -1;
-                }
-                memcpy(dirname, relative, component_len);
-                dirname[component_len] = '\0';
-
-                if (snprintf(child_prefix, sizeof(child_prefix), "%s%s/", prefix, dirname) >= (int)sizeof(child_prefix)) {
-                    return -1;
-                }
-
-                if (write_tree_level(index, child_prefix, &child_id) != 0) {
-                    return -1;
-                }
-
-                if (tree_add_entry(&tree, MODE_DIR, &child_id, dirname) != 0) {
-                    return -1;
-                }
-            }
+        if (tree_add_entry(&tree, MODE_DIR, &child_id, child->name) != 0) {
+            return -1;
         }
     }
 
@@ -233,6 +291,8 @@ static int write_tree_level(const Index *index, const char *prefix, ObjectID *id
 // Returns 0 on success, -1 on error.
 int tree_from_index(ObjectID *id_out) {
     Index index;
+    BuildNode *root;
+    int rc;
 
     if (id_out == NULL) {
         return -1;
@@ -242,5 +302,27 @@ int tree_from_index(ObjectID *id_out) {
         return -1;
     }
 
-    return write_tree_level(&index, "", id_out);
+    root = build_node_create("", MODE_DIR, NULL, 0);
+    if (root == NULL) {
+        return -1;
+    }
+
+    for (int i = 0; i < index.count; i++) {
+        char path_copy[sizeof(index.entries[i].path)];
+
+        if (strlen(index.entries[i].path) >= sizeof(path_copy)) {
+            build_node_free(root);
+            return -1;
+        }
+
+        strcpy(path_copy, index.entries[i].path);
+        if (insert_index_path(root, path_copy, &index.entries[i]) != 0) {
+            build_node_free(root);
+            return -1;
+        }
+    }
+
+    rc = write_tree_from_node(root, id_out);
+    build_node_free(root);
+    return rc;
 }
