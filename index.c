@@ -194,6 +194,12 @@ int index_load(Index *index) {
     return 0;
 }
 
+static int index_entry_path_cmp(const void *a, const void *b) {
+    const IndexEntry *ea = (const IndexEntry *)a;
+    const IndexEntry *eb = (const IndexEntry *)b;
+    return strcmp(ea->path, eb->path);
+}
+
 // Save the index to .pes/index atomically.
 //
 // HINTS - Useful functions and syscalls:
@@ -205,10 +211,58 @@ int index_load(Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_save(const Index *index) {
-    // TODO: Implement atomic index saving
-    // (See Lab Appendix for logical steps)
-    (void)index;
-    return -1;
+    const char *temp_path = ".pes/index.tmp";
+    FILE *fp = NULL;
+    Index sorted;
+
+    if (index == NULL) return -1;
+
+    sorted = *index;
+    qsort(sorted.entries, (size_t)sorted.count, sizeof(IndexEntry), index_entry_path_cmp);
+
+    fp = fopen(temp_path, "w");
+    if (fp == NULL) return -1;
+
+    for (int i = 0; i < sorted.count; i++) {
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(&sorted.entries[i].hash, hex);
+
+        if (fprintf(fp, "%o %s %llu %u %s\n",
+                    sorted.entries[i].mode,
+                    hex,
+                    (unsigned long long)sorted.entries[i].mtime_sec,
+                    sorted.entries[i].size,
+                    sorted.entries[i].path) < 0) {
+            fclose(fp);
+            unlink(temp_path);
+            return -1;
+        }
+    }
+
+    if (fflush(fp) != 0) {
+        fclose(fp);
+        unlink(temp_path);
+        return -1;
+    }
+
+    if (fsync(fileno(fp)) != 0) {
+        fclose(fp);
+        unlink(temp_path);
+        return -1;
+    }
+
+    if (fclose(fp) != 0) {
+        unlink(temp_path);
+        return -1;
+    }
+    fp = NULL;
+
+    if (rename(temp_path, INDEX_FILE) != 0) {
+        unlink(temp_path);
+        return -1;
+    }
+
+    return 0;
 }
 
 // Stage a file for the next commit.
