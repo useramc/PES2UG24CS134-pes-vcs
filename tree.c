@@ -81,9 +81,11 @@ int tree_parse(const void *data, size_t len, Tree *tree_out) {
     return 0;
 }
 
-// Helper for qsort to ensure consistent tree hashing
-static int compare_tree_entries(const void *a, const void *b) {
-    return strcmp(((const TreeEntry *)a)->name, ((const TreeEntry *)b)->name);
+// qsort comparator: order entries lexicographically by filename.
+static int compare_tree_entries_by_name(const void *a, const void *b) {
+    const TreeEntry *entry_a = (const TreeEntry *)a;
+    const TreeEntry *entry_b = (const TreeEntry *)b;
+    return strcmp(entry_a->name, entry_b->name);
 }
 
 // Serialize a Tree struct into binary format for storage.
@@ -97,7 +99,7 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 
     // Create a mutable copy to sort entries (Git requirement)
     Tree sorted_tree = *tree;
-    qsort(sorted_tree.entries, sorted_tree.count, sizeof(TreeEntry), compare_tree_entries);
+    qsort(sorted_tree.entries, sorted_tree.count, sizeof(TreeEntry), compare_tree_entries_by_name);
 
     size_t offset = 0;
     for (int i = 0; i < sorted_tree.count; i++) {
