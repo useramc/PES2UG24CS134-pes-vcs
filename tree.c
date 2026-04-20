@@ -239,6 +239,8 @@ static int insert_index_path(BuildNode *parent, char *path, const IndexEntry *en
     }
 }
 
+// Recursively write a directory tree bottom-up:
+// first write each child subtree to get its hash, then write this directory.
 static int write_tree_from_node(const BuildNode *node, ObjectID *id_out) {
     Tree tree;
     void *data = NULL;
@@ -256,6 +258,7 @@ static int write_tree_from_node(const BuildNode *node, ObjectID *id_out) {
             continue;
         }
 
+        // Directories are written bottom-up so parent entries can store child tree hashes.
         if (write_tree_from_node(child, &child_id) != 0) {
             return -1;
         }
@@ -324,6 +327,7 @@ int tree_from_index(ObjectID *id_out) {
         }
     }
 
+    // Writing starts at the root, but each subtree is stored before its parent.
     rc = write_tree_from_node(root, id_out);
     build_node_free(root);
     return rc;
