@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <dirent.h>
 
+int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out);
+
 // ─── PROVIDED ────────────────────────────────────────────────────────────────
 
 // Find an index entry by path (linear scan).
@@ -275,8 +277,60 @@ int index_save(const Index *index) {
 //
 // Returns 0 on success, -1 on error.
 int index_add(Index *index, const char *path) {
-    // TODO: Implement file staging
-    // (See Lab Appendix for logical steps)
-    (void)index; (void)path;
-    return -1;
+    struct stat st;
+    FILE *fp = NULL;
+    void *buf = NULL;
+    size_t file_size = 0;
+    ObjectID blob_id;
+    IndexEntry *entry;
+
+    if (index == NULL || path == NULL) return -1;
+
+    if (stat(path, &st) != 0) return -1;
+    if (!S_ISREG(st.st_mode)) return -1;
+
+    file_size = (size_t)st.st_size;
+    if (file_size > 0) {
+        buf = malloc(file_size);
+        if (buf == NULL) return -1;
+
+        fp = fopen(path, "rb");
+        if (fp == NULL) {
+            free(buf);
+            return -1;
+        }
+
+        if (fread(buf, 1, file_size, fp) != file_size) {
+            fclose(fp);
+            free(buf);
+            return -1;
+        }
+
+        if (fclose(fp) != 0) {
+            free(buf);
+            return -1;
+        }
+        fp = NULL;
+    }
+
+    if (object_write(OBJ_BLOB, buf, file_size, &blob_id) != 0) {
+        free(buf);
+        return -1;
+    }
+    free(buf);
+
+    entry = index_find(index, path);
+    if (entry == NULL) {
+        if (index->count >= MAX_INDEX_ENTRIES) return -1;
+        entry = &index->entries[index->count++];
+    }
+
+    strncpy(entry->path, path, sizeof(entry->path) - 1);
+    entry->path[sizeof(entry->path) - 1] = '\0';
+    entry->hash = blob_id;
+    entry->mtime_sec = (uint64_t)st.st_mtime;
+    entry->size = (uint32_t)st.st_size;
+    entry->mode = (st.st_mode & S_IXUSR) ? 0100755 : 0100644;
+
+    return index_save(index);
 }
