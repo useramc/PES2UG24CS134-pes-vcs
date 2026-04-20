@@ -215,28 +215,37 @@ static int index_entry_path_cmp(const void *a, const void *b) {
 int index_save(const Index *index) {
     const char *temp_path = ".pes/index.tmp";
     FILE *fp = NULL;
-    Index sorted;
+    IndexEntry *sorted_entries = NULL;
 
     if (index == NULL) return -1;
+    if (index->count < 0 || index->count > MAX_INDEX_ENTRIES) return -1;
 
-    sorted = *index;
-    qsort(sorted.entries, (size_t)sorted.count, sizeof(IndexEntry), index_entry_path_cmp);
+    if (index->count > 0) {
+        sorted_entries = malloc((size_t)index->count * sizeof(IndexEntry));
+        if (sorted_entries == NULL) return -1;
+        memcpy(sorted_entries, index->entries, (size_t)index->count * sizeof(IndexEntry));
+        qsort(sorted_entries, (size_t)index->count, sizeof(IndexEntry), index_entry_path_cmp);
+    }
 
     fp = fopen(temp_path, "w");
-    if (fp == NULL) return -1;
+    if (fp == NULL) {
+        free(sorted_entries);
+        return -1;
+    }
 
-    for (int i = 0; i < sorted.count; i++) {
+    for (int i = 0; i < index->count; i++) {
         char hex[HASH_HEX_SIZE + 1];
-        hash_to_hex(&sorted.entries[i].hash, hex);
+        hash_to_hex(&sorted_entries[i].hash, hex);
 
         if (fprintf(fp, "%o %s %llu %u %s\n",
-                    sorted.entries[i].mode,
+                    sorted_entries[i].mode,
                     hex,
-                    (unsigned long long)sorted.entries[i].mtime_sec,
-                    sorted.entries[i].size,
-                    sorted.entries[i].path) < 0) {
+                    (unsigned long long)sorted_entries[i].mtime_sec,
+                    sorted_entries[i].size,
+                    sorted_entries[i].path) < 0) {
             fclose(fp);
             unlink(temp_path);
+            free(sorted_entries);
             return -1;
         }
     }
@@ -244,26 +253,31 @@ int index_save(const Index *index) {
     if (fflush(fp) != 0) {
         fclose(fp);
         unlink(temp_path);
+        free(sorted_entries);
         return -1;
     }
 
     if (fsync(fileno(fp)) != 0) {
         fclose(fp);
         unlink(temp_path);
+        free(sorted_entries);
         return -1;
     }
 
     if (fclose(fp) != 0) {
         unlink(temp_path);
+        free(sorted_entries);
         return -1;
     }
     fp = NULL;
 
     if (rename(temp_path, INDEX_FILE) != 0) {
         unlink(temp_path);
+        free(sorted_entries);
         return -1;
     }
 
+    free(sorted_entries);
     return 0;
 }
 
