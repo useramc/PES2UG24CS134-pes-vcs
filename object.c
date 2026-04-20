@@ -9,6 +9,7 @@
 // TODO functions:     object_write, object_read
 
 #include "pes.h"
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,6 +61,32 @@ int object_exists(const ObjectID *id) {
     return access(path, F_OK) == 0;
 }
 
+static const char *object_type_name(ObjectType type) {
+    switch (type) {
+        case OBJ_BLOB: return "blob";
+        case OBJ_TREE: return "tree";
+        case OBJ_COMMIT: return "commit";
+        default: return NULL;
+    }
+}
+
+static int write_all(int fd, const void *buf, size_t len) {
+    const unsigned char *p = (const unsigned char *)buf;
+
+    while (len > 0) {
+        ssize_t written = write(fd, p, len);
+        if (written < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+
+        p += (size_t)written;
+        len -= (size_t)written;
+    }
+
+    return 0;
+}
+
 // ─── TODO: Implement these ──────────────────────────────────────────────────
 
 // Write an object to the store.
@@ -94,9 +121,106 @@ int object_exists(const ObjectID *id) {
 //
 // Returns 0 on success, -1 on error.
 int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out) {
-    // TODO: Implement
-    (void)type; (void)data; (void)len; (void)id_out;
-    return -1;
+    const char *type_name = object_type_name(type);
+    char header[64];
+    int header_len;
+    size_t object_len;
+    unsigned char *object_buf = NULL;
+    char final_path[512];
+    char shard_dir[512];
+    char temp_path[512] = "";
+    int temp_fd = -1;
+    int dir_fd = -1;
+    int rc = -1;
+
+    if (type_name == NULL || id_out == NULL || (data == NULL && len > 0)) {
+        return -1;
+    }
+
+    header_len = snprintf(header, sizeof(header), "%s %zu", type_name, len) + 1;
+    if (header_len <= 0 || (size_t)header_len > sizeof(header)) {
+        return -1;
+    }
+
+    object_len = (size_t)header_len + len;
+    object_buf = malloc(object_len);
+    if (object_buf == NULL) {
+        return -1;
+    }
+
+    memcpy(object_buf, header, (size_t)header_len);
+    if (len > 0) {
+        memcpy(object_buf + header_len, data, len);
+    }
+
+    compute_hash(object_buf, object_len, id_out);
+    object_path(id_out, final_path, sizeof(final_path));
+
+    if (object_exists(id_out)) {
+        rc = 0;
+        goto cleanup;
+    }
+
+    {
+        char hex[HASH_HEX_SIZE + 1];
+        hash_to_hex(id_out, hex);
+        if (snprintf(shard_dir, sizeof(shard_dir), "%s/%.2s", OBJECTS_DIR, hex) >= (int)sizeof(shard_dir)) {
+            goto cleanup;
+        }
+    }
+
+    if (mkdir(shard_dir, 0755) != 0 && errno != EEXIST) {
+        goto cleanup;
+    }
+
+    if (snprintf(temp_path, sizeof(temp_path), "%s/.tmp-XXXXXX", shard_dir) >= (int)sizeof(temp_path)) {
+        goto cleanup;
+    }
+
+    temp_fd = mkstemp(temp_path);
+    if (temp_fd < 0) {
+        goto cleanup;
+    }
+
+    if (write_all(temp_fd, object_buf, object_len) != 0) {
+        goto cleanup;
+    }
+
+    if (fsync(temp_fd) != 0) {
+        goto cleanup;
+    }
+
+    if (close(temp_fd) != 0) {
+        temp_fd = -1;
+        goto cleanup;
+    }
+    temp_fd = -1;
+
+    if (rename(temp_path, final_path) != 0) {
+        if (object_exists(id_out)) {
+            unlink(temp_path);
+            rc = 0;
+            goto cleanup;
+        }
+        goto cleanup;
+    }
+
+    dir_fd = open(shard_dir, O_RDONLY);
+    if (dir_fd < 0) {
+        goto cleanup;
+    }
+    if (fsync(dir_fd) != 0) {
+        goto cleanup;
+    }
+
+    rc = 0;
+
+cleanup:
+    if (dir_fd >= 0) close(dir_fd);
+    if (temp_fd >= 0) close(temp_fd);
+    if (rc != 0 && temp_path[0] != '\0') unlink(temp_path);
+    free(object_buf);
+    return rc;
 }
 
 // Read an object from the store.
