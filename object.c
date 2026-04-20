@@ -139,7 +139,7 @@ int object_write(ObjectType type, const void *data, size_t len, ObjectID *id_out
 
     header_len = snprintf(header, sizeof(header), "%s %zu", type_name, len) + 1;
     //
-    header[header_len - 1] = '\0';
+   // header[header_len - 1] = '\0';
     if (header_len <= 0 || (size_t)header_len > sizeof(header)) {
         return -1;
     }
