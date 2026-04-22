@@ -1,4 +1,5 @@
 # PES Version Control System (PES-VCS)
+# Name: CHINMAYI HEBBAR AM   SRN: PES2UG24CS134
 
 ## Overview
 This project is a simplified version control system inspired by Git. It implements core filesystem concepts such as content-addressable storage, staging areas, atomic writes, and commit history tracking.
